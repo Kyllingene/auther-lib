@@ -1,7 +1,24 @@
-#[doc = include_str!("../README.md")]
+use getrandom::getrandom;
 use rand_core::{RngCore, SeedableRng};
 use rand_hc::Hc128Rng;
 use sha2::{Digest, Sha512};
+#[doc = include_str!("../README.md")]
+use std::{fmt::Write, num::ParseIntError};
+
+pub fn decode_hex(s: &String) -> Result<Vec<u8>, ParseIntError> {
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16))
+        .collect()
+}
+
+pub fn encode_hex(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        write!(&mut s, "{b:02x}").unwrap();
+    }
+    s
+}
 
 #[cfg(feature = "serde")]
 use {
@@ -9,12 +26,29 @@ use {
     std::{fs::File, io::Read, path::Path},
 };
 
+fn get_rand() -> Result<[u8; 32], getrandom::Error> {
+    let mut data = [0u8; 32];
+
+    let mut errors = 0;
+    while let Err(e) = getrandom(&mut data) {
+        if errors == 8 {
+            return Err(e);
+        }
+
+        errors += 1;
+    }
+
+    Ok(data)
+}
+
 fn xor<T: Into<Vec<u8>>>(x: T, y: &String) -> Vec<u8> {
     let x: Vec<u8> = x.into();
     let mut y = y.as_bytes().to_vec();
 
     let mut hasher = Sha512::new();
+    y.reverse();
     hasher.update(y.clone());
+    y.reverse();
     let seed: [u8; 32] = hasher.finalize()[..32].try_into().unwrap();
 
     let mut rng = Hc128Rng::from_seed(seed);
@@ -30,14 +64,53 @@ fn xor<T: Into<Vec<u8>>>(x: T, y: &String) -> Vec<u8> {
 
 /// A passkey you can use to verify/store a password.
 ///
+/// The salt for hashed passwords comes from the system.
+///
 /// Can be a hash of a password, a plaintext password, or an encrypted password.
 /// Encryption is an xor with a key, using rand::Hc128Rng to generate pseudorandom filler (seeded by the key).
 /// ***Using a long, random encryption key is stongly advised!***
+///
+/// ```
+/// # use auther_lib::*;
+/// let pass = Passkey::Plain("abc123".to_string());
+///
+/// // hashes the password; use `hashed_pass.salt()`
+/// // to retrieve the salt later
+/// let hash = pass.hash(None, None).unwrap();
+///
+/// // encrypts the password
+/// let key = "qwertyuiop".to_string();
+/// let encrypted = pass.encrypt(&key).unwrap();
+///
+/// // you can check against a plaintext password...
+/// assert!(
+///     pass.check(
+///         &Passkey::Plain(
+///             "abc123".to_string()
+///         ), None).unwrap()
+/// );
+///
+/// // ...or against a hash...
+/// assert!(
+///     pass.check(&hash, None).unwrap()
+/// );
+///
+/// // ...or against an encrypted passkey
+/// assert!(
+///     pass.check(&encrypted, Some(&key)).unwrap()
+/// );
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Passkey {
-    Hash(String),
+    Hash(String, [u8; 64]),
     Plain(String),
     Encrypted(Vec<u8>),
+}
+
+impl Default for Passkey {
+    fn default() -> Self {
+        Self::Plain(String::new())
+    }
 }
 
 #[cfg(feature = "serde")]
@@ -47,17 +120,16 @@ impl Serialize for Passkey {
         S: serde::Serializer,
     {
         match self {
-            Self::Plain(pass) | Self::Hash(pass) => serializer.serialize_str(pass),
-            Self::Encrypted(pass) => serializer.collect_seq(pass),
-        }
-    }
-}
+            Self::Plain(pass) => serializer.serialize_str(pass),
+            Self::Hash(hash, salt) => {
+                let mut state = serializer.serialize_map(None)?;
 
-impl AsRef<[u8]> for Passkey {
-    fn as_ref(&self) -> &[u8] {
-        match self {
-            Self::Encrypted(ctext) => ctext,
-            Self::Hash(t) | Self::Plain(t) => t.as_bytes(),
+                state.serialize_entry("hash", hash)?;
+                state.serialize_entry("salt", &encode_hex(salt))?;
+
+                state.end()
+            }
+            Self::Encrypted(pass) => serializer.serialize_str(encode_hex(pass).as_str()),
         }
     }
 }
@@ -65,30 +137,101 @@ impl AsRef<[u8]> for Passkey {
 impl Passkey {
     /// Checks against another passkey.
     ///
-    /// If the key is encrypted, and `other` is not, requires a key to decrypt with.
-    pub fn check(&self, other: &Passkey, key: Option<&String>) -> bool {
-        other.hash(key) == self.hash(key)
+    /// If one key is encrypted and the other isn't, requires a key to decrypt with.
+    pub fn check(&self, other: &Passkey, key: Option<&String>) -> Option<bool> {
+        Some(match self {
+            Self::Hash(_, salt) => match other {
+                Self::Hash(..) => self == other,
+                Self::Plain(_) => self == &other.hash(Some(*salt), None)?,
+                Self::Encrypted(_) => {
+                    let pass = other.decrypt(key?);
+                    if pass.is_none() {
+                        false
+                    } else {
+                        self.check(&pass.unwrap(), None)?
+                    }
+                }
+            },
+            Self::Plain(pass) => match other {
+                Self::Hash(..) => other.check(self, key)?,
+                Self::Plain(other) => pass == other,
+                Self::Encrypted(..) => {
+                    let pass = other.decrypt(key?);
+                    if pass.is_none() {
+                        false
+                    } else {
+                        self.check(&pass.unwrap(), None)?
+                    }
+                }
+            },
+            Self::Encrypted(ctext) => match other {
+                Self::Encrypted(other) => ctext == other,
+                _ => {
+                    let pass = self.decrypt(key?);
+                    if pass.is_none() {
+                        false
+                    } else {
+                        other.check(&pass.unwrap(), None)?
+                    }
+                }
+            },
+        })
     }
 
-    /// Returns a Passkey::Hash of the password, using sha512.
+    /// Returns a Passkey::Hash of the password, using sha512. Uses the system rng to salt the password.
     ///
     /// If the password is encrypted, requires a key to decrypt with.
-    pub fn hash(&self, key: Option<&String>) -> Option<Passkey> {
-        Some(Passkey::Hash(match self {
-            Self::Hash(hash) => hash.clone(),
+    pub fn hash(&self, salt: Option<[u8; 64]>, key: Option<&String>) -> Option<Passkey> {
+        let hash;
+        let mut salt_raw = salt.unwrap_or([0u8; 64]);
+        match self {
+            Self::Hash(h, s) => {
+                hash = h.clone();
+                salt_raw = *s;
+            }
             Self::Plain(pass) => {
+                if salt.is_none() {
+                    let mut rng = Hc128Rng::from_seed(get_rand().ok()?);
+                    rng.fill_bytes(&mut salt_raw);
+                }
+
                 let mut hasher = Sha512::new();
                 hasher.update(pass);
-                format!("{:x}", hasher.finalize())
+                hasher.update(salt_raw);
+                hash = format!("{:02x}", hasher.finalize());
             }
             Self::Encrypted(_) => {
                 let pass = self.decrypt(key?)?;
 
+                if salt.is_none() {
+                    let mut rng = Hc128Rng::from_seed(get_rand().ok()?);
+                    rng.fill_bytes(&mut salt_raw);
+                }
+
                 let mut hasher = Sha512::new();
-                hasher.update(pass);
-                format!("{:x}", hasher.finalize())
+
+                let bytes = match pass {
+                    Self::Plain(pass) => pass.into_bytes(),
+                    Self::Hash(hash, _) => decode_hex(&hash).unwrap(),
+                    Self::Encrypted(ctext) => ctext,
+                };
+
+                hasher.update(bytes);
+                hasher.update(salt_raw);
+                hash = format!("{:02x}", hasher.finalize());
             }
-        }))
+        }
+
+        Some(Self::Hash(hash, salt_raw))
+    }
+
+    /// Returns the salt, if self is Passkey::Hash.
+    pub fn salt(&self) -> Option<[u8; 64]> {
+        if let Self::Hash(_, salt) = self {
+            Some(*salt)
+        } else {
+            None
+        }
     }
 
     /// Encrypts the password. Cannot encrypt a hash.
@@ -96,7 +239,7 @@ impl Passkey {
     /// Does nothing if the password is already encrypted.
     pub fn encrypt(&self, key: &String) -> Option<Passkey> {
         Some(match self {
-            Self::Hash(_) => None?,
+            Self::Hash(..) => None?,
             Self::Plain(pass) => Passkey::Encrypted(xor(pass.clone(), key)),
             Self::Encrypted(_) => self.clone(),
         })
@@ -107,7 +250,7 @@ impl Passkey {
     /// Does nothing if the password is already decrypted.
     pub fn decrypt(&self, key: &String) -> Option<Passkey> {
         Some(match self {
-            Self::Hash(_) => None?,
+            Self::Hash(..) => None?,
             Self::Encrypted(ctext) => {
                 Passkey::Plain(String::from_utf8(xor(ctext.clone(), key)).ok()?)
             }
@@ -117,6 +260,15 @@ impl Passkey {
 }
 
 /// Password data.
+///
+/// ```
+/// # use auther_lib::*;
+/// let data = Data::all(
+///     "example.com".to_string(),
+///     "user@example.com".to_string(),
+///     "user".to_string()
+/// );
+/// ```
 #[derive(Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Data {
     location: String,
@@ -184,9 +336,19 @@ impl Data {
 }
 
 /// A Passkey with associated information (Data).
+///
+/// ```
+/// # use auther_lib::*;
+/// let mut pass = Password::plain("abc123".to_string());
+///
+/// pass.add_email("example.com".to_string(), "user@example.com".to_string());
+/// pass.add_username("website.net".to_string(), "user".to_string());
+///
+/// assert_eq!(pass.email()[0], "user@example.com".to_string());
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Password {
-    pass: Passkey,
+    pub pass: Passkey,
     data: Vec<Data>,
 }
 
@@ -202,7 +364,7 @@ impl Serialize for Password {
             "type",
             match self.pass {
                 Passkey::Plain(_) => "plain",
-                Passkey::Hash(_) => "hash",
+                Passkey::Hash(..) => "hash",
                 Passkey::Encrypted(_) => "encrypted",
             },
         )?;
@@ -232,8 +394,8 @@ impl Password {
     }
 
     /// Creates a new hashed password.
-    pub fn hash(pass: String) -> Self {
-        Self::new(Passkey::Hash(pass))
+    pub fn hash(hash: String, salt: [u8; 64]) -> Self {
+        Self::new(Passkey::Hash(hash, salt))
     }
 
     pub fn encrypted(pass: Vec<u8>) -> Self {
@@ -243,7 +405,7 @@ impl Password {
     /// Checks against a passkey.
     ///
     /// If the key is encrypted, and `other` is not, requires a key to decrypt with.
-    pub fn check(&self, other: &Passkey, key: Option<&String>) -> bool {
+    pub fn check(&self, other: &Passkey, key: Option<&String>) -> Option<bool> {
         self.pass.check(other, key)
     }
 
@@ -408,7 +570,22 @@ impl TryFrom<String> for PassManager {
                         }
                         "hash" => {
                             if let Some(toml::Value::String(pass)) = &password.get("pass") {
-                                let mut pass = Password::hash(pass.clone());
+                                let salt = if let Some(toml::Value::String(salt)) =
+                                    &password.get("salt")
+                                {
+                                    let salt = decode_hex(salt)
+                                        .map_err(|_| LoadPasswordsError::InvalidPass)?;
+
+                                    if salt.len() != 64 {
+                                        return Err(LoadPasswordsError::InvalidPass);
+                                    }
+
+                                    salt.try_into().unwrap()
+                                } else {
+                                    return Err(LoadPasswordsError::InvalidPass);
+                                };
+
+                                let mut pass = Password::hash(pass.clone(), salt);
 
                                 if let Some(toml::Value::Array(locations)) =
                                     &password.get("location")
@@ -452,18 +629,9 @@ impl TryFrom<String> for PassManager {
                             }
                         }
                         "encrypted" => {
-                            if let Some(toml::Value::Array(pass)) = &password.get("pass") {
-                                let mut pass = pass.iter();
-
-                                let mut bytes = Vec::new();
-                                while let Some(&toml::Value::Integer(i)) = pass.next() {
-                                    if !(0..=255).contains(&i) {
-                                        return Err(LoadPasswordsError::InvalidPass);
-                                    } else {
-                                        bytes.push(i as u8);
-                                    }
-                                }
-
+                            if let Some(toml::Value::String(pass)) = &password.get("pass") {
+                                let bytes = decode_hex(pass)
+                                    .map_err(|_| LoadPasswordsError::InvalidPass)?;
                                 let mut pass = Password::encrypted(bytes);
 
                                 if let Some(toml::Value::Array(locations)) =
@@ -556,7 +724,7 @@ impl PassManager {
         if let Some(pass) = self
             .passwords
             .iter_mut()
-            .find(|p| p.check(&password.pass, None))
+            .find(|p| p.check(&password.pass, None).unwrap_or(false))
         {
             pass.data.append(&mut password.data);
         } else {
@@ -612,6 +780,29 @@ impl PassManager {
 mod tests {
     use crate::*;
 
+    #[cfg(feature = "serde")]
+    const EXAMPLE: &str = r#"[[passwords]]
+type = "plain"
+pass = "abc123"
+
+[[passwords.location]]
+name = "example.com"
+email = "user@example.com"
+username = "user"
+
+[[passwords]]
+type = "hash"
+pass = "33cc8b1e74bde1aa2008f415782c51d933bad19dc9bbca15ff3a594ba13c351a421d97942a6395f5aa07e5116a9e744650684dbcac1250701f2823cc20fea649"
+salt = "9b96947183bcfa788c7ec0c8b4d3fa2c7ef686d7b29434a3a99e9cbcc65c4d2328c8e2cca57fbc4f21c1dc262bcd8129cbeba5a65158e948a03ea3a2778c8cec"
+
+[[passwords.location]]
+name = "example.net"
+username = "user"
+
+[[passwords]]
+type = "encrypted"
+pass = "10150643464a""#;
+
     macro_rules! s {
         ( $string:expr ) => {
             String::from($string)
@@ -623,20 +814,20 @@ mod tests {
         let pass1 = Passkey::Plain(s!("Hello, World! 0123456789"));
         let pass2 = Passkey::Plain(s!("Hello, World! 0123456788"));
 
-        let hash1 = pass1.hash(None).unwrap();
-        let hash2 = pass2.hash(None).unwrap();
+        let hash1 = pass1.hash(None, None).unwrap();
+        let hash2 = pass2.hash(None, None).unwrap();
 
-        assert!(pass1.check(&pass1, None));
-        assert!(pass1.check(&hash1, None));
+        assert_eq!(pass1.check(&pass1, None), Some(true));
+        assert_eq!(pass1.check(&hash1, None), Some(true));
 
-        assert!(!pass1.check(&pass2, None));
-        assert!(!pass1.check(&hash2, None));
+        assert_eq!(pass1.check(&pass2, None), Some(false));
+        assert_eq!(pass1.check(&hash2, None), Some(false));
 
-        assert!(pass2.check(&pass2, None));
-        assert!(pass2.check(&hash2, None));
+        assert_eq!(pass2.check(&pass2, None), Some(true));
+        assert_eq!(pass2.check(&hash2, None), Some(true));
 
-        assert!(!pass2.check(&pass1, None));
-        assert!(!pass2.check(&hash1, None));
+        assert_eq!(pass2.check(&pass1, None), Some(false));
+        assert_eq!(pass2.check(&hash1, None), Some(false));
     }
 
     #[test]
@@ -644,11 +835,11 @@ mod tests {
         let pass1 = Passkey::Plain(s!("Hello, World! 0123456789"));
         let pass2 = Passkey::Plain(s!("Hello, World! 0123456788"));
 
-        let hash1 = pass1.hash(None).unwrap();
-        let hash2 = pass2.hash(None).unwrap();
+        let hash1 = pass1.hash(None, None).unwrap();
+        let hash2 = pass2.hash(None, None).unwrap();
 
-        let key1 = s!("abc1234");
-        let key2 = s!("abc1233");
+        let key1 = s!("abc123");
+        let key2 = s!("abc122");
 
         let enc1 = pass1.encrypt(&key1).unwrap();
         let enc2 = pass2.encrypt(&key2).unwrap();
@@ -656,80 +847,53 @@ mod tests {
         assert_eq!(pass1, enc1.decrypt(&key1).unwrap());
         assert_eq!(pass2, enc2.decrypt(&key2).unwrap());
 
-        assert_eq!(hash1, enc1.hash(Some(&key1)).unwrap());
-        assert_eq!(hash2, enc2.hash(Some(&key2)).unwrap());
+        assert_eq!(
+            hash1,
+            enc1.hash(Some(hash1.salt().unwrap()), Some(&key1)).unwrap()
+        );
+        assert_eq!(
+            hash2,
+            enc2.hash(Some(hash2.salt().unwrap()), Some(&key2)).unwrap()
+        );
 
-        assert!(enc1.check(&enc1, None));
-        assert!(enc1.check(&pass1, Some(&key1)));
-        assert!(enc1.check(&hash1, Some(&key1)));
+        assert_eq!(enc1.check(&enc1, None), Some(true));
+        assert_eq!(enc1.check(&pass1, Some(&key1)), Some(true));
+        assert_eq!(enc1.check(&hash1, Some(&key1)), Some(true));
 
-        assert!(!enc1.check(&pass1, Some(&key2)));
-        assert!(!enc1.check(&pass2, Some(&key1)));
-        assert!(!enc1.check(&pass2, Some(&key2)));
+        assert_eq!(enc1.check(&pass1, Some(&key2)), Some(false));
+        assert_eq!(enc1.check(&pass2, Some(&key1)), Some(false));
+        assert_eq!(enc1.check(&pass2, Some(&key2)), Some(false));
 
-        assert!(!enc1.check(&hash1, Some(&key2)));
-        assert!(!enc1.check(&hash2, Some(&key1)));
-        assert!(!enc1.check(&hash2, Some(&key2)));
+        assert_eq!(enc1.check(&hash1, Some(&key2)), Some(false));
+        assert_eq!(enc1.check(&hash2, Some(&key1)), Some(false));
+        assert_eq!(enc1.check(&hash2, Some(&key2)), Some(false));
 
-        assert!(enc2.check(&enc2, None));
-        assert!(enc2.check(&pass2, Some(&key2)));
-        assert!(enc2.check(&hash2, Some(&key2)));
+        assert_eq!(enc2.check(&enc2, None), Some(true));
+        assert_eq!(enc2.check(&pass2, Some(&key2)), Some(true));
+        assert_eq!(enc2.check(&hash2, Some(&key2)), Some(true));
 
-        assert!(!enc2.check(&pass2, Some(&key1)));
-        assert!(!enc2.check(&pass1, Some(&key2)));
-        assert!(!enc2.check(&pass1, Some(&key1)));
+        assert_eq!(enc2.check(&pass2, Some(&key1)), Some(false));
+        assert_eq!(enc2.check(&pass1, Some(&key2)), Some(false));
+        assert_eq!(enc2.check(&pass1, Some(&key1)), Some(false));
 
-        assert!(!enc2.check(&hash2, Some(&key1)));
-        assert!(!enc2.check(&hash1, Some(&key2)));
-        assert!(!enc2.check(&hash1, Some(&key1)));
+        assert_eq!(enc2.check(&hash2, Some(&key1)), Some(false));
+        assert_eq!(enc2.check(&hash1, Some(&key2)), Some(false));
+        assert_eq!(enc2.check(&hash1, Some(&key1)), Some(false));
     }
 
     #[cfg(feature = "serde")]
     #[test]
     fn parse_from_toml() {
-        let text = s!(r#"passwords = [
-    # plain password with one full location
-    { type = "plain", pass = "abc123", location = [{name = "example.com", username = "user", email = "user@example.com"}] },
+        let text = s!(EXAMPLE);
 
-    # hashed password with one location and user
-    { type = "hash", pass = "c70b5dd9ebfb6f51d09d4132b7170c9d20750a7852f00680f65658f0310e810056e6763c34c9a00b0e940076f54495c169fc2302cceb312039271c43469507dc", location = [{name = "example.net", username = "user"}] },
-
-    # encrypted password with no associated data
-    { type = "encrypted", pass = [16, 21, 6, 67, 70, 74] }
-]"#);
-
-        let text2 = s!(r#"[[passwords]]
-type = "plain"
-pass = "abc123"
-
-[[passwords.location]]
-name = "example.com"
-email = "user@example.com"
-username = "user"
-
-[[passwords]]
-type = "hash"
-pass = "c70b5dd9ebfb6f51d09d4132b7170c9d20750a7852f00680f65658f0310e810056e6763c34c9a00b0e940076f54495c169fc2302cceb312039271c43469507dc"
-
-[[passwords.location]]
-name = "example.net"
-username = "user"
-
-[[passwords]]
-type = "encrypted"
-pass = [16, 21, 6, 67, 70, 74]"#);
-
-        let manager: PassManager = text.try_into().unwrap();
-        let manager2 = text2.try_into().unwrap();
-
-        assert_eq!(manager, manager2);
+        let manager: PassManager = text.try_into().expect("Failed to parse toml");
 
         assert_eq!(
             manager
                 .get_email(s!("example.com"), s!("user@example.com"))
                 .expect("Failed to get plain password")
                 .check(&Passkey::Plain(s!("abc123")), None),
-            true
+            Some(true)
         );
 
         assert_eq!(
@@ -737,7 +901,7 @@ pass = [16, 21, 6, 67, 70, 74]"#);
                 .get_username(s!("example.net"), s!("user"))
                 .expect("Failed to get hashed password")
                 .check(&Passkey::Plain(s!("abc123")), None),
-            true
+            Some(true)
         );
 
         assert_eq!(
@@ -745,7 +909,7 @@ pass = [16, 21, 6, 67, 70, 74]"#);
                 .get_passkey(Passkey::Encrypted(vec![16, 21, 6, 67, 70, 74]))
                 .expect("Failed to get encrypted password")
                 .check(&Passkey::Plain(s!("abc123")), Some(&s!("qwerty"))),
-            true
+            Some(true)
         );
     }
 
@@ -754,9 +918,7 @@ pass = [16, 21, 6, 67, 70, 74]"#);
     fn serialize() {
         use toml::Serializer;
 
-        let text = s!(
-            r#"passwords=[{type="plain",pass="abc123",location=[{name="example.com",username="user",email ="user@example.com"}]},{type="hash",pass="c70b5dd9ebfb6f51d09d4132b7170c9d20750a7852f00680f65658f0310e810056e6763c34c9a00b0e940076f54495c169fc2302cceb312039271c43469507dc",location=[{name="example.net",username="user"}]},{type="encrypted",pass=[16,21,6,67,70,74]}]"#
-        );
+        let text = s!(EXAMPLE);
 
         let manager1: PassManager = text.clone().try_into().expect("Failed to parse toml");
 
@@ -766,6 +928,6 @@ pass = [16, 21, 6, 67, 70, 74]"#);
 
         let manager2 = out.try_into().unwrap();
 
-        assert_eq!(manager1, manager2,);
+        assert_eq!(manager1, manager2);
     }
 }
