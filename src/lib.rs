@@ -43,12 +43,12 @@ pub enum Passkey {
 #[cfg(feature = "serde")]
 impl Serialize for Passkey {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-        where
-            S: serde::Serializer {
+    where
+        S: serde::Serializer,
+    {
         match self {
-            Self::Plain(pass) |
-            Self::Hash(pass) => serializer.serialize_str(pass),
-            Self::Encrypted(pass) => serializer.collect_seq(pass)
+            Self::Plain(pass) | Self::Hash(pass) => serializer.serialize_str(pass),
+            Self::Encrypted(pass) => serializer.collect_seq(pass),
         }
     }
 }
@@ -127,8 +127,9 @@ pub struct Data {
 #[cfg(feature = "serde")]
 impl Serialize for Data {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-        where
-            S: serde::Serializer {
+    where
+        S: serde::Serializer,
+    {
         let mut state = serializer.serialize_map(None)?;
 
         state.serialize_entry("name", &self.location)?;
@@ -192,15 +193,19 @@ pub struct Password {
 #[cfg(feature = "serde")]
 impl Serialize for Password {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-        where
-            S: serde::Serializer {
+    where
+        S: serde::Serializer,
+    {
         let mut state = serializer.serialize_map(None)?;
 
-        state.serialize_entry("type", match self.pass {
-            Passkey::Plain(_) => "plain",
-            Passkey::Hash(_) => "hash",
-            Passkey::Encrypted(_) => "encrypted",
-        })?;
+        state.serialize_entry(
+            "type",
+            match self.pass {
+                Passkey::Plain(_) => "plain",
+                Passkey::Hash(_) => "hash",
+                Passkey::Encrypted(_) => "encrypted",
+            },
+        )?;
 
         state.serialize_entry("pass", &self.pass)?;
 
@@ -331,10 +336,11 @@ pub struct PassManager {
 #[cfg(feature = "serde")]
 impl Serialize for PassManager {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-        where
-            S: serde::Serializer {
+    where
+        S: serde::Serializer,
+    {
         let mut state = serializer.serialize_map(Some(1))?;
-        
+
         state.serialize_entry("passwords", &self.passwords)?;
 
         state.end()
@@ -372,7 +378,9 @@ impl TryFrom<String> for PassManager {
                                         {
                                             data.location = name.clone();
                                         } else {
-                                            return Err(LoadPasswordsError::InvalidStructure("must provide a location name"));
+                                            return Err(LoadPasswordsError::InvalidStructure(
+                                                "must provide a location name",
+                                            ));
                                         }
 
                                         if let Some(toml::Value::String(email)) =
@@ -393,7 +401,9 @@ impl TryFrom<String> for PassManager {
 
                                 manager.add_password(pass);
                             } else {
-                                return Err(LoadPasswordsError::InvalidStructure("must provide a pass"));
+                                return Err(LoadPasswordsError::InvalidStructure(
+                                    "must provide a pass",
+                                ));
                             }
                         }
                         "hash" => {
@@ -413,7 +423,9 @@ impl TryFrom<String> for PassManager {
                                         {
                                             data.location = name.clone();
                                         } else {
-                                            return Err(LoadPasswordsError::InvalidStructure("must provide a location name"));
+                                            return Err(LoadPasswordsError::InvalidStructure(
+                                                "must provide a location name",
+                                            ));
                                         }
 
                                         if let Some(toml::Value::String(email)) =
@@ -434,7 +446,9 @@ impl TryFrom<String> for PassManager {
 
                                 manager.add_password(pass);
                             } else {
-                                return Err(LoadPasswordsError::InvalidStructure("must provide a pass"));
+                                return Err(LoadPasswordsError::InvalidStructure(
+                                    "must provide a pass",
+                                ));
                             }
                         }
                         "encrypted" => {
@@ -465,7 +479,9 @@ impl TryFrom<String> for PassManager {
                                         {
                                             data.location = name.clone();
                                         } else {
-                                            return Err(LoadPasswordsError::InvalidStructure("must provide a location name"));
+                                            return Err(LoadPasswordsError::InvalidStructure(
+                                                "must provide a location name",
+                                            ));
                                         }
 
                                         if let Some(toml::Value::String(email)) =
@@ -486,17 +502,23 @@ impl TryFrom<String> for PassManager {
 
                                 manager.add_password(pass);
                             } else {
-                                return Err(LoadPasswordsError::InvalidStructure("must provide a pass"));
+                                return Err(LoadPasswordsError::InvalidStructure(
+                                    "must provide a pass",
+                                ));
                             }
                         }
                         _ => return Err(LoadPasswordsError::InvalidPassType),
                     }
                 } else {
-                    return Err(LoadPasswordsError::InvalidStructure("must provide a pass type"));
+                    return Err(LoadPasswordsError::InvalidStructure(
+                        "must provide a pass type",
+                    ));
                 }
             }
         } else {
-            return Err(LoadPasswordsError::InvalidStructure("must provide a password list"));
+            return Err(LoadPasswordsError::InvalidStructure(
+                "must provide a password list",
+            ));
         }
 
         Ok(manager)
@@ -700,10 +722,7 @@ pass = [16, 21, 6, 67, 70, 74]"#);
         let manager: PassManager = text.try_into().unwrap();
         let manager2 = text2.try_into().unwrap();
 
-        assert_eq!(
-            manager,
-            manager2
-        );
+        assert_eq!(manager, manager2);
 
         assert_eq!(
             manager
@@ -735,7 +754,9 @@ pass = [16, 21, 6, 67, 70, 74]"#);
     fn serialize() {
         use toml::Serializer;
 
-        let text = s!(r#"passwords=[{type="plain",pass="abc123",location=[{name="example.com",username="user",email ="user@example.com"}]},{type="hash",pass="c70b5dd9ebfb6f51d09d4132b7170c9d20750a7852f00680f65658f0310e810056e6763c34c9a00b0e940076f54495c169fc2302cceb312039271c43469507dc",location=[{name="example.net",username="user"}]},{type="encrypted",pass=[16,21,6,67,70,74]}]"#);
+        let text = s!(
+            r#"passwords=[{type="plain",pass="abc123",location=[{name="example.com",username="user",email ="user@example.com"}]},{type="hash",pass="c70b5dd9ebfb6f51d09d4132b7170c9d20750a7852f00680f65658f0310e810056e6763c34c9a00b0e940076f54495c169fc2302cceb312039271c43469507dc",location=[{name="example.net",username="user"}]},{type="encrypted",pass=[16,21,6,67,70,74]}]"#
+        );
 
         let manager1: PassManager = text.clone().try_into().expect("Failed to parse toml");
 
@@ -745,9 +766,6 @@ pass = [16, 21, 6, 67, 70, 74]"#);
 
         let manager2 = out.try_into().unwrap();
 
-        assert_eq!(
-            manager1,
-            manager2,
-        );
+        assert_eq!(manager1, manager2,);
     }
 }
