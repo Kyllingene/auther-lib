@@ -1,10 +1,13 @@
 #[doc = include_str!("../README.md")]
-
-use std::{fs::File, io::Read, path::Path};
-
 use rand_core::{RngCore, SeedableRng};
 use rand_hc::Hc128Rng;
 use sha2::{Digest, Sha512};
+
+#[cfg(feature = "serde")]
+use {
+    serde::{ser::SerializeMap, Serialize},
+    std::{fs::File, io::Read, path::Path},
+};
 
 fn xor<T: Into<Vec<u8>>>(x: T, y: &String) -> Vec<u8> {
     let x: Vec<u8> = x.into();
@@ -35,6 +38,19 @@ pub enum Passkey {
     Hash(String),
     Plain(String),
     Encrypted(Vec<u8>),
+}
+
+#[cfg(feature = "serde")]
+impl Serialize for Passkey {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer {
+        match self {
+            Self::Plain(pass) |
+            Self::Hash(pass) => serializer.serialize_str(pass),
+            Self::Encrypted(pass) => serializer.collect_seq(pass)
+        }
+    }
 }
 
 impl AsRef<[u8]> for Passkey {
@@ -108,6 +124,27 @@ pub struct Data {
     username: Option<String>,
 }
 
+#[cfg(feature = "serde")]
+impl Serialize for Data {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer {
+        let mut state = serializer.serialize_map(None)?;
+
+        state.serialize_entry("name", &self.location)?;
+
+        if let Some(email) = &self.email {
+            state.serialize_entry("email", email)?;
+        }
+
+        if let Some(username) = &self.username {
+            state.serialize_entry("username", username)?;
+        }
+
+        state.end()
+    }
+}
+
 impl Data {
     /// Creates a Data with just a location.
     pub fn location(location: String) -> Self {
@@ -134,6 +171,15 @@ impl Data {
             username: Some(username),
         }
     }
+
+    /// Creates a Data with a location, email, and username.
+    pub fn all(location: String, email: String, username: String) -> Self {
+        Self {
+            location,
+            email: Some(email),
+            username: Some(username),
+        }
+    }
 }
 
 /// A Passkey with associated information (Data).
@@ -141,6 +187,29 @@ impl Data {
 pub struct Password {
     pass: Passkey,
     data: Vec<Data>,
+}
+
+#[cfg(feature = "serde")]
+impl Serialize for Password {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer {
+        let mut state = serializer.serialize_map(None)?;
+
+        state.serialize_entry("type", match self.pass {
+            Passkey::Plain(_) => "plain",
+            Passkey::Hash(_) => "hash",
+            Passkey::Encrypted(_) => "encrypted",
+        })?;
+
+        state.serialize_entry("pass", &self.pass)?;
+
+        if !self.data.is_empty() {
+            state.serialize_entry("location", &self.data)?;
+        }
+
+        state.end()
+    }
 }
 
 impl Password {
@@ -242,10 +311,11 @@ impl Password {
     }
 }
 
+#[cfg(feature = "serde")]
 #[derive(Debug)]
 pub enum LoadPasswordsError {
     InvalidSyntax(toml::de::Error),
-    InvalidStructure,
+    InvalidStructure(&'static str),
     InvalidPassType,
     InvalidPass,
 
@@ -258,6 +328,20 @@ pub struct PassManager {
     passwords: Vec<Password>,
 }
 
+#[cfg(feature = "serde")]
+impl Serialize for PassManager {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer {
+        let mut state = serializer.serialize_map(Some(1))?;
+        
+        state.serialize_entry("passwords", &self.passwords)?;
+
+        state.end()
+    }
+}
+
+#[cfg(feature = "serde")]
 impl TryFrom<String> for PassManager {
     type Error = LoadPasswordsError;
     fn try_from(value: String) -> Result<Self, Self::Error> {
@@ -288,7 +372,7 @@ impl TryFrom<String> for PassManager {
                                         {
                                             data.location = name.clone();
                                         } else {
-                                            return Err(LoadPasswordsError::InvalidStructure);
+                                            return Err(LoadPasswordsError::InvalidStructure("must provide a location name"));
                                         }
 
                                         if let Some(toml::Value::String(email)) =
@@ -309,7 +393,7 @@ impl TryFrom<String> for PassManager {
 
                                 manager.add_password(pass);
                             } else {
-                                return Err(LoadPasswordsError::InvalidStructure);
+                                return Err(LoadPasswordsError::InvalidStructure("must provide a pass"));
                             }
                         }
                         "hash" => {
@@ -329,7 +413,7 @@ impl TryFrom<String> for PassManager {
                                         {
                                             data.location = name.clone();
                                         } else {
-                                            return Err(LoadPasswordsError::InvalidStructure);
+                                            return Err(LoadPasswordsError::InvalidStructure("must provide a location name"));
                                         }
 
                                         if let Some(toml::Value::String(email)) =
@@ -350,7 +434,7 @@ impl TryFrom<String> for PassManager {
 
                                 manager.add_password(pass);
                             } else {
-                                return Err(LoadPasswordsError::InvalidStructure);
+                                return Err(LoadPasswordsError::InvalidStructure("must provide a pass"));
                             }
                         }
                         "encrypted" => {
@@ -381,7 +465,7 @@ impl TryFrom<String> for PassManager {
                                         {
                                             data.location = name.clone();
                                         } else {
-                                            return Err(LoadPasswordsError::InvalidStructure);
+                                            return Err(LoadPasswordsError::InvalidStructure("must provide a location name"));
                                         }
 
                                         if let Some(toml::Value::String(email)) =
@@ -402,23 +486,24 @@ impl TryFrom<String> for PassManager {
 
                                 manager.add_password(pass);
                             } else {
-                                return Err(LoadPasswordsError::InvalidStructure);
+                                return Err(LoadPasswordsError::InvalidStructure("must provide a pass"));
                             }
                         }
                         _ => return Err(LoadPasswordsError::InvalidPassType),
                     }
                 } else {
-                    return Err(LoadPasswordsError::InvalidStructure);
+                    return Err(LoadPasswordsError::InvalidStructure("must provide a pass type"));
                 }
             }
         } else {
-            return Err(LoadPasswordsError::InvalidStructure);
+            return Err(LoadPasswordsError::InvalidStructure("must provide a password list"));
         }
 
         Ok(manager)
     }
 }
 
+#[cfg(feature = "serde")]
 impl TryFrom<&Path> for PassManager {
     type Error = LoadPasswordsError;
     fn try_from(path: &Path) -> Result<Self, Self::Error> {
@@ -513,8 +598,8 @@ mod tests {
 
     #[test]
     fn plain_verif() {
-        let pass1 = Passkey::Plain(String::from("Hello, World! 0123456789"));
-        let pass2 = Passkey::Plain(String::from("Hello, World! 0123456788"));
+        let pass1 = Passkey::Plain(s!("Hello, World! 0123456789"));
+        let pass2 = Passkey::Plain(s!("Hello, World! 0123456788"));
 
         let hash1 = pass1.hash(None).unwrap();
         let hash2 = pass2.hash(None).unwrap();
@@ -534,14 +619,14 @@ mod tests {
 
     #[test]
     fn encrypted_verif() {
-        let pass1 = Passkey::Plain(String::from("Hello, World! 0123456789"));
-        let pass2 = Passkey::Plain(String::from("Hello, World! 0123456788"));
+        let pass1 = Passkey::Plain(s!("Hello, World! 0123456789"));
+        let pass2 = Passkey::Plain(s!("Hello, World! 0123456788"));
 
         let hash1 = pass1.hash(None).unwrap();
         let hash2 = pass2.hash(None).unwrap();
 
-        let key1 = String::from("abc1234");
-        let key2 = String::from("abc1233");
+        let key1 = s!("abc1234");
+        let key2 = s!("abc1233");
 
         let enc1 = pass1.encrypt(&key1).unwrap();
         let enc2 = pass2.encrypt(&key2).unwrap();
@@ -577,6 +662,7 @@ mod tests {
         assert!(!enc2.check(&hash1, Some(&key1)));
     }
 
+    #[cfg(feature = "serde")]
     #[test]
     fn parse_from_toml() {
         let text = s!(r#"passwords = [
@@ -590,7 +676,34 @@ mod tests {
     { type = "encrypted", pass = [16, 21, 6, 67, 70, 74] }
 ]"#);
 
-        let manager: PassManager = text.try_into().expect("Failed to parse toml");
+        let text2 = s!(r#"[[passwords]]
+type = "plain"
+pass = "abc123"
+
+[[passwords.location]]
+name = "example.com"
+email = "user@example.com"
+username = "user"
+
+[[passwords]]
+type = "hash"
+pass = "c70b5dd9ebfb6f51d09d4132b7170c9d20750a7852f00680f65658f0310e810056e6763c34c9a00b0e940076f54495c169fc2302cceb312039271c43469507dc"
+
+[[passwords.location]]
+name = "example.net"
+username = "user"
+
+[[passwords]]
+type = "encrypted"
+pass = [16, 21, 6, 67, 70, 74]"#);
+
+        let manager: PassManager = text.try_into().unwrap();
+        let manager2 = text2.try_into().unwrap();
+
+        assert_eq!(
+            manager,
+            manager2
+        );
 
         assert_eq!(
             manager
@@ -614,6 +727,27 @@ mod tests {
                 .expect("Failed to get encrypted password")
                 .check(&Passkey::Plain(s!("abc123")), Some(&s!("qwerty"))),
             true
+        );
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn serialize() {
+        use toml::Serializer;
+
+        let text = s!(r#"passwords=[{type="plain",pass="abc123",location=[{name="example.com",username="user",email ="user@example.com"}]},{type="hash",pass="c70b5dd9ebfb6f51d09d4132b7170c9d20750a7852f00680f65658f0310e810056e6763c34c9a00b0e940076f54495c169fc2302cceb312039271c43469507dc",location=[{name="example.net",username="user"}]},{type="encrypted",pass=[16,21,6,67,70,74]}]"#);
+
+        let manager1: PassManager = text.clone().try_into().expect("Failed to parse toml");
+
+        let mut out = String::new();
+        let serializer = Serializer::new(&mut out);
+        manager1.serialize(serializer).unwrap();
+
+        let manager2 = out.try_into().unwrap();
+
+        assert_eq!(
+            manager1,
+            manager2,
         );
     }
 }
