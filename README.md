@@ -1,8 +1,8 @@
 # auther
 ### a password manager lib
 
-#### **auther is not very cryptographically secure, so**
-#### **help with getting this right would be very appreciated**
+#### **auther may not be very cryptographically secure, so**
+#### **help getting this right would be greatly appreciated**
 
 ## parsing from files:
 
