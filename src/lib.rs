@@ -816,6 +816,15 @@ impl PassManager {
     pub fn remove_by_username(&mut self, location: String, username: String) {
         self.remove_by_data(Data::username(location, username))
     }
+
+    /// Get a mutable reference to a password.
+    /// 
+    /// The passwords must be identical.
+    pub fn get_mut(&mut self, pass: Password) -> Option<&mut Password> {
+        self.passwords
+            .iter_mut()
+            .find(|p| p == &&pass)
+    }
 }
 
 #[cfg(test)]
