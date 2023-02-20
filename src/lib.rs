@@ -2,6 +2,7 @@ use getrandom::getrandom;
 use rand_core::{RngCore, SeedableRng};
 use rand_hc::Hc128Rng;
 use sha2::{Digest, Sha512};
+use std::fmt::Display;
 #[doc = include_str!("../README.md")]
 use std::{fmt::Write, num::ParseIntError};
 
@@ -487,6 +488,23 @@ pub enum LoadPasswordsError {
     InvalidPass,
 
     FileError(std::io::Error),
+}
+
+#[cfg(feature = "serde")]
+impl Display for LoadPasswordsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidSyntax(e) => write!(f, "Syntax error: {e}")?,
+            Self::InvalidStructure(e) => write!(f, "Structure error: {e}")?,
+
+            Self::InvalidPassType => write!(f, "Invalid password type (somewhere)")?,
+            Self::InvalidPass => write!(f, "Invalid password (somewhere)")?,
+
+            Self::FileError(e) => write!(f, "File error: {e}")?,
+        }
+
+        Ok(())
+    }
 }
 
 /// A password manager.
