@@ -784,15 +784,6 @@ mod tests {
 
     #[cfg(feature = "serde")]
     const EXAMPLE: &str = r#"[[passwords]]
-type = "hash"
-pass = "33cc8b1e74bde1aa2008f415782c51d933bad19dc9bbca15ff3a594ba13c351a421d97942a6395f5aa07e5116a9e744650684dbcac1250701f2823cc20fea649"
-salt = "9b96947183bcfa788c7ec0c8b4d3fa2c7ef686d7b29434a3a99e9cbcc65c4d2328c8e2cca57fbc4f21c1dc262bcd8129cbeba5a65158e948a03ea3a2778c8cec"
-    
-[[passwords.location]]
-name = "example.net"
-username = "user"
-
-[[passwords]]
 type = "plain"
 pass = "abc123"
 
@@ -805,17 +796,14 @@ username = "user"
 type = "encrypted"
 pass = "10150643464a"
 
-[[passwords.location]]
-name = "example.io"
-
 [[passwords]]
-type = "plain"
-pass = "def456"
+type = "hash"
+pass = "95f6dbe5b0c7b7feb458eae5d9bb3c8314d0d8cce1c192fa59127480bb4448541a2872fd69e8d823c0fdc054e93d88ce21eeeafc7c3480e679f2135614a88611"
+salt = "5c5a1916d307fc0bc7b116398b2fd15efd05d654d0ffe0f762339c88f694d0dc737ff4a1e2c7fa251b0bec00058eec4b9cb9073712ab308197d62692b19fd851"
 
 [[passwords.location]]
-name = "fake.org"
-username = "asdf"
-"#;
+name = "example.net"
+username = "user""#;
 
     macro_rules! s {
         ( $string:expr ) => {
