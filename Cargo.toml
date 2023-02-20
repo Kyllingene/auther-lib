@@ -2,7 +2,7 @@
 name = "auther-lib"
 description = "a password manager lib"
 
-version = "3.0.2"
+version = "3.0.3"
 edition = "2021"
 
 license = "MIT"

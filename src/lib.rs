@@ -272,9 +272,9 @@ impl Passkey {
 /// ```
 #[derive(Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Data {
-    location: String,
-    email: Option<String>,
-    username: Option<String>,
+    pub location: String,
+    pub email: Option<String>,
+    pub username: Option<String>,
 }
 
 #[cfg(feature = "serde")]
