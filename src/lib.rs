@@ -352,7 +352,7 @@ impl Serialize for Password {
             }
             Passkey::Encrypted(ctext) => {
                 state.serialize_entry("type", "encrypted")?;
-                state.serialize_entry("pass", &encode_hex(&ctext))?;
+                state.serialize_entry("pass", &encode_hex(ctext))?;
             }
         }
 
