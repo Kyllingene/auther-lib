@@ -1,10 +1,10 @@
+#[doc = include_str!("../README.md")]
+use std::{fmt::Write, num::ParseIntError};
+
 use getrandom::getrandom;
 use rand_core::{RngCore, SeedableRng};
 use rand_hc::Hc128Rng;
 use sha2::{Digest, Sha512};
-use std::fmt::Display;
-#[doc = include_str!("../README.md")]
-use std::{fmt::Write, num::ParseIntError};
 
 pub fn decode_hex(s: &String) -> Result<Vec<u8>, ParseIntError> {
     (0..s.len())
@@ -24,7 +24,7 @@ pub fn encode_hex(bytes: &[u8]) -> String {
 #[cfg(feature = "serde")]
 use {
     serde::{ser::SerializeMap, Serialize},
-    std::{fs::File, io::Read, path::Path},
+    std::{fmt::Display, fs::File, io::Read, path::Path},
 };
 
 fn get_rand() -> Result<[u8; 32], getrandom::Error> {
@@ -65,7 +65,7 @@ fn xor<T: Into<Vec<u8>>>(x: T, y: &String) -> Vec<u8> {
 
 /// A passkey you can use to verify/store a password.
 ///
-/// The salt for hashed passwords comes from the system.
+/// The salt for hashed passwords comes from the system random source.
 ///
 /// Can be a hash of a password, a plaintext password, or an encrypted password.
 /// Encryption is an xor with a key, using rand::Hc128Rng to generate pseudorandom filler (seeded by the key).
@@ -111,27 +111,6 @@ pub enum Passkey {
 impl Default for Passkey {
     fn default() -> Self {
         Self::Plain(String::new())
-    }
-}
-
-#[cfg(feature = "serde")]
-impl Serialize for Passkey {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        match self {
-            Self::Plain(pass) => serializer.serialize_str(pass),
-            Self::Hash(hash, salt) => {
-                let mut state = serializer.serialize_map(None)?;
-
-                state.serialize_entry("hash", hash)?;
-                state.serialize_entry("salt", &encode_hex(salt))?;
-
-                state.end()
-            }
-            Self::Encrypted(pass) => serializer.serialize_str(encode_hex(pass).as_str()),
-        }
     }
 }
 
@@ -361,16 +340,21 @@ impl Serialize for Password {
     {
         let mut state = serializer.serialize_map(None)?;
 
-        state.serialize_entry(
-            "type",
-            match self.pass {
-                Passkey::Plain(_) => "plain",
-                Passkey::Hash(..) => "hash",
-                Passkey::Encrypted(_) => "encrypted",
-            },
-        )?;
-
-        state.serialize_entry("pass", &self.pass)?;
+        match &self.pass {
+            Passkey::Plain(pass) => {
+                state.serialize_entry("type", "plain")?;
+                state.serialize_entry("pass", &pass)?;
+            }
+            Passkey::Hash(hash, salt) => {
+                state.serialize_entry("type", "hash")?;
+                state.serialize_entry("pass", &hash)?;
+                state.serialize_entry("salt", &encode_hex(salt))?;
+            }
+            Passkey::Encrypted(ctext) => {
+                state.serialize_entry("type", "encrypted")?;
+                state.serialize_entry("pass", &encode_hex(&ctext))?;
+            }
+        }
 
         if !self.data.is_empty() {
             state.serialize_entry("location", &self.data)?;
@@ -489,7 +473,7 @@ impl Password {
 pub enum LoadPasswordsError {
     InvalidSyntax(toml::de::Error),
     InvalidStructure(&'static str),
-    InvalidPassType,
+    InvalidPassType(String),
     InvalidPass,
 
     FileError(std::io::Error),
@@ -502,7 +486,7 @@ impl Display for LoadPasswordsError {
             Self::InvalidSyntax(e) => write!(f, "Syntax error: {e}")?,
             Self::InvalidStructure(e) => write!(f, "Structure error: {e}")?,
 
-            Self::InvalidPassType => write!(f, "Invalid password type (somewhere)")?,
+            Self::InvalidPassType(t) => write!(f, "Invalid password type: {t}")?,
             Self::InvalidPass => write!(f, "Invalid password (somewhere)")?,
 
             Self::FileError(e) => write!(f, "File error: {e}")?,
@@ -544,14 +528,14 @@ impl TryFrom<String> for PassManager {
 
         if let Some(toml::Value::Array(passwords)) = &parsed.get("passwords") {
             for password in passwords {
-                if let Some(toml::Value::String(ty)) = &password.get("type") {
+                if let Some(toml::Value::String(ty)) = password.get("type") {
                     match ty.as_str() {
                         "plain" => {
-                            if let Some(toml::Value::String(pass)) = &password.get("pass") {
+                            if let Some(toml::Value::String(pass)) = password.get("pass") {
                                 let mut pass = Password::plain(pass.clone());
 
                                 if let Some(toml::Value::Array(locations)) =
-                                    &password.get("location")
+                                    password.get("location")
                                 {
                                     let mut locations = locations.iter();
                                     while let Some(toml::Value::Table(location)) = locations.next()
@@ -592,26 +576,25 @@ impl TryFrom<String> for PassManager {
                             }
                         }
                         "hash" => {
-                            if let Some(toml::Value::String(pass)) = &password.get("pass") {
-                                let salt = if let Some(toml::Value::String(salt)) =
-                                    &password.get("salt")
-                                {
-                                    let salt = decode_hex(salt)
-                                        .map_err(|_| LoadPasswordsError::InvalidPass)?;
+                            if let Some(toml::Value::String(pass)) = password.get("pass") {
+                                let salt =
+                                    if let Some(toml::Value::String(salt)) = password.get("salt") {
+                                        let salt = decode_hex(salt)
+                                            .map_err(|_| LoadPasswordsError::InvalidPass)?;
 
-                                    if salt.len() != 64 {
+                                        if salt.len() != 64 {
+                                            return Err(LoadPasswordsError::InvalidPass);
+                                        }
+
+                                        salt.try_into().unwrap()
+                                    } else {
                                         return Err(LoadPasswordsError::InvalidPass);
-                                    }
-
-                                    salt.try_into().unwrap()
-                                } else {
-                                    return Err(LoadPasswordsError::InvalidPass);
-                                };
+                                    };
 
                                 let mut pass = Password::hash(pass.clone(), salt);
 
                                 if let Some(toml::Value::Array(locations)) =
-                                    &password.get("location")
+                                    password.get("location")
                                 {
                                     let mut locations = locations.iter();
                                     while let Some(toml::Value::Table(location)) = locations.next()
@@ -652,13 +635,13 @@ impl TryFrom<String> for PassManager {
                             }
                         }
                         "encrypted" => {
-                            if let Some(toml::Value::String(pass)) = &password.get("pass") {
+                            if let Some(toml::Value::String(pass)) = password.get("pass") {
                                 let bytes = decode_hex(pass)
                                     .map_err(|_| LoadPasswordsError::InvalidPass)?;
                                 let mut pass = Password::encrypted(bytes);
 
                                 if let Some(toml::Value::Array(locations)) =
-                                    &password.get("location")
+                                    password.get("location")
                                 {
                                     let mut locations = locations.iter();
                                     while let Some(toml::Value::Table(location)) = locations.next()
@@ -698,7 +681,7 @@ impl TryFrom<String> for PassManager {
                                 ));
                             }
                         }
-                        _ => return Err(LoadPasswordsError::InvalidPassType),
+                        ty => return Err(LoadPasswordsError::InvalidPassType(ty.to_owned())),
                     }
                 } else {
                     return Err(LoadPasswordsError::InvalidStructure(
@@ -742,13 +725,9 @@ impl PassManager {
 
     /// Adds a password.
     ///
-    /// If the password already exists, updates the password instead (unless it's encrypted).
+    /// If the passwords are identical (not matching), updates the information instead.
     pub fn add_password(&mut self, mut password: Password) {
-        if let Some(pass) = self
-            .passwords
-            .iter_mut()
-            .find(|p| p.check(&password.pass, None).unwrap_or(false))
-        {
+        if let Some(pass) = self.passwords.iter_mut().find(|p| p == &&password) {
             pass.data.append(&mut password.data);
         } else {
             self.passwords.push(password);
@@ -805,6 +784,15 @@ mod tests {
 
     #[cfg(feature = "serde")]
     const EXAMPLE: &str = r#"[[passwords]]
+type = "hash"
+pass = "33cc8b1e74bde1aa2008f415782c51d933bad19dc9bbca15ff3a594ba13c351a421d97942a6395f5aa07e5116a9e744650684dbcac1250701f2823cc20fea649"
+salt = "9b96947183bcfa788c7ec0c8b4d3fa2c7ef686d7b29434a3a99e9cbcc65c4d2328c8e2cca57fbc4f21c1dc262bcd8129cbeba5a65158e948a03ea3a2778c8cec"
+    
+[[passwords.location]]
+name = "example.net"
+username = "user"
+
+[[passwords]]
 type = "plain"
 pass = "abc123"
 
@@ -814,17 +802,20 @@ email = "user@example.com"
 username = "user"
 
 [[passwords]]
-type = "hash"
-pass = "33cc8b1e74bde1aa2008f415782c51d933bad19dc9bbca15ff3a594ba13c351a421d97942a6395f5aa07e5116a9e744650684dbcac1250701f2823cc20fea649"
-salt = "9b96947183bcfa788c7ec0c8b4d3fa2c7ef686d7b29434a3a99e9cbcc65c4d2328c8e2cca57fbc4f21c1dc262bcd8129cbeba5a65158e948a03ea3a2778c8cec"
+type = "encrypted"
+pass = "10150643464a"
 
 [[passwords.location]]
-name = "example.net"
-username = "user"
+name = "example.io"
 
 [[passwords]]
-type = "encrypted"
-pass = "10150643464a""#;
+type = "plain"
+pass = "def456"
+
+[[passwords.location]]
+name = "fake.org"
+username = "asdf"
+"#;
 
     macro_rules! s {
         ( $string:expr ) => {
@@ -923,7 +914,7 @@ pass = "10150643464a""#;
             manager
                 .get_username(s!("example.net"), s!("user"))
                 .expect("Failed to get hashed password")
-                .check(&Passkey::Plain(s!("abc123")), None),
+                .check(&Passkey::Plain(s!("def456")), None),
             Some(true)
         );
 
@@ -939,15 +930,13 @@ pass = "10150643464a""#;
     #[cfg(feature = "serde")]
     #[test]
     fn serialize() {
-        use toml::Serializer;
-
         let text = s!(EXAMPLE);
 
         let manager1: PassManager = text.clone().try_into().expect("Failed to parse toml");
 
-        let mut out = String::new();
-        let serializer = Serializer::new(&mut out);
-        manager1.serialize(serializer).unwrap();
+        let out = toml::to_string_pretty(&manager1).unwrap();
+
+        println!("{manager1:#?}\n\n{out}");
 
         let manager2 = out.try_into().unwrap();
 
