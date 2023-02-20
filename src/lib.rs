@@ -727,7 +727,7 @@ impl PassManager {
     ///
     /// If the passwords are identical (not matching), updates the information instead.
     pub fn add_password(&mut self, mut password: Password) {
-        if let Some(pass) = self.passwords.iter_mut().find(|p| p == &&password) {
+        if let Some(pass) = self.passwords.iter_mut().find(|p| p.pass == password.pass) {
             pass.data.append(&mut password.data);
         } else {
             self.passwords.push(password);
@@ -779,7 +779,7 @@ impl PassManager {
 
     /// Removes a password.
     /// 
-    /// The passkey must be identical.
+    /// The passkeys must be identical.
     pub fn remove(&mut self, pass: Passkey) {
         self.passwords.retain(|p| p.pass != pass);
     }
