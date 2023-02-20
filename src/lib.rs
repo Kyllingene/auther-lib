@@ -776,6 +776,46 @@ impl PassManager {
             })
             .cloned()
     }
+
+    /// Removes a password.
+    /// 
+    /// The passkey must be identical.
+    pub fn remove(&mut self, pass: Passkey) {
+        self.passwords.retain(|p| p.pass != pass);
+    }
+
+    /// Removes a password by data.
+    /// 
+    /// Ignores empty fields in `data`.
+    pub fn remove_by_data(&mut self, data: Data) {
+        self.passwords.retain(|pass| {
+            !(pass.location().contains(&data.location)
+                    && (data.email.is_none() || pass.email().contains((data.email).as_ref().unwrap()))
+                    && (data.username.is_none()
+                        || pass.username().contains((data.username).as_ref().unwrap())))
+        });
+    }
+
+    /// Removes a password by location.
+    /// 
+    /// If multiple passwords match, removes them all.
+    pub fn remove_by_location(&mut self, location: String) {
+        self.remove_by_data(Data::location(location))
+    }
+
+    /// Removes a password by location and email.
+    /// 
+    /// If multiple passwords match, removes them all.
+    pub fn remove_by_email(&mut self, location: String, email: String) {
+        self.remove_by_data(Data::email(location, email))
+    }
+
+    /// Removes a password by location and username.
+    /// 
+    /// If multiple passwords match, removes them all.
+    pub fn remove_by_username(&mut self, location: String, username: String) {
+        self.remove_by_data(Data::username(location, username))
+    }
 }
 
 #[cfg(test)]
