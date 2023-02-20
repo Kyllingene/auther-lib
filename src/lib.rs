@@ -428,6 +428,11 @@ impl Password {
         self.data.iter().map(|d| d.location.clone()).collect()
     }
 
+    /// Returns all associated Data.
+    pub fn data(&self) -> Vec<Data> {
+        self.data.clone()
+    }
+
     /// Adds a location with an email.
     pub fn add_email(&mut self, location: String, email: String) {
         self.add(Data::email(location, email));
